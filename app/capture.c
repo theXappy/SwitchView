@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <turbojpeg.h>
 #include <unistd.h>
 
 #define NBUF 4
@@ -24,6 +25,10 @@ struct capture {
   struct vbuf bufs[NBUF];
   unsigned nbufs, width, height, stride, fourcc;
   SDL_Texture *tex;
+  // MJPEG decode (tj == NULL for raw formats)
+  tjhandle tj;
+  uint8_t *rgb;         // decoded RGB scratch, width*height*3
+  unsigned jpeg_bytes;  // compressed size of the latest frame
   // audio
   int have_audio;
   snd_pcm_t *pcm;
@@ -183,11 +188,21 @@ static int video_grab_latest(struct capture *c)
     b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     b.memory = V4L2_MEMORY_MMAP;
     if (xioctl(c->fd, VIDIOC_DQBUF, &b) < 0) break;
-    if (latest >= 0) {
+    // Skip error frames, the empty placeholder frames some capture cards
+    // interleave (MJPEG SOI+EOI only, a handful of bytes, no image), and any
+    // frame not starting with the JPEG SOI marker (0xFFD8). Requeue them at
+    // once so only the newest *real* frame can become `latest`.
+    const uint8_t *d = c->bufs[b.index].ptr;
+    if ((b.flags & V4L2_BUF_FLAG_ERROR) || b.bytesused <= 64 || d[0] != 0xFF || d[1] != 0xD8) {
+      xioctl(c->fd, VIDIOC_QBUF, &b);
+      continue;
+    }
+    if (latest >= 0) {  // a newer real frame supersedes the one we were holding
       struct v4l2_buffer r = {.type = b.type, .memory = b.memory, .index = (unsigned)latest};
       xioctl(c->fd, VIDIOC_QBUF, &r);
     }
-    latest = (b.flags & V4L2_BUF_FLAG_ERROR) ? (xioctl(c->fd, VIDIOC_QBUF, &b), -1) : (int)b.index;
+    latest = (int)b.index;
+    c->jpeg_bytes = b.bytesused;
   }
   return latest;
 }
@@ -208,7 +223,15 @@ struct capture *capture_open(const struct capture_opts *o, SDL_Renderer *ren)
   pthread_mutex_init(&c->luma_lock, NULL);
   if (video_open(c, o) < 0) { capture_close(c); return NULL; }
 
-  Uint32 tex_fmt = c->fourcc == V4L2_PIX_FMT_NV12 ? SDL_PIXELFORMAT_NV12 : SDL_PIXELFORMAT_YUY2;
+  Uint32 tex_fmt;
+  if (c->fourcc == V4L2_PIX_FMT_MJPEG) {
+    c->tj = tjInitDecompress();
+    c->rgb = malloc((size_t)c->width * c->height * 3);
+    if (!c->tj || !c->rgb) { fprintf(stderr, "turbojpeg init failed\n"); capture_close(c); return NULL; }
+    tex_fmt = SDL_PIXELFORMAT_RGB24;
+  } else {
+    tex_fmt = c->fourcc == V4L2_PIX_FMT_NV12 ? SDL_PIXELFORMAT_NV12 : SDL_PIXELFORMAT_YUY2;
+  }
   c->tex = SDL_CreateTexture(ren, tex_fmt, SDL_TEXTUREACCESS_STREAMING, (int)c->width, (int)c->height);
   if (!c->tex) { fprintf(stderr, "SDL texture: %s\n", SDL_GetError()); capture_close(c); return NULL; }
   SDL_SetYUVConversionMode(c->height > 576 ? SDL_YUV_CONVERSION_BT709 : SDL_YUV_CONVERSION_BT601);
@@ -234,6 +257,8 @@ void capture_close(struct capture *c)
     close(c->fd);
   }
   if (c->tex) SDL_DestroyTexture(c->tex);
+  if (c->tj) tjDestroy(c->tj);
+  free(c->rgb);
   free(c->luma);
   pthread_mutex_destroy(&c->luma_lock);
   free(c);
@@ -246,19 +271,36 @@ int capture_poll(struct capture *c, int timeout_ms)
   int idx = video_grab_latest(c);
   if (idx < 0) return 0;
   const Uint8 *p = c->bufs[idx].ptr;
+  if (c->fourcc == V4L2_PIX_FMT_MJPEG) {
+    // turbojpeg returns -1 on mere warnings too (the frame still decodes fine);
+    // only a FATAL error means the pixels are unusable, so skip just those.
+    if (tjDecompress2(c->tj, p, c->jpeg_bytes, c->rgb, (int)c->width, 0, (int)c->height,
+                      TJPF_RGB, TJFLAG_FASTDCT) < 0 && tjGetErrorCode(c->tj) == TJERR_FATAL) {
+      fprintf(stderr, "mjpeg decode: %s\n", tjGetErrorStr2(c->tj));
+      video_requeue(c, idx);
+      return 0;
+    }
+  }
   if (atomic_exchange(&c->luma_wanted, 0)) {
     pthread_mutex_lock(&c->luma_lock);
     if (!c->luma) c->luma = malloc((size_t)c->width * c->height);
     for (unsigned y = 0; y < c->height; y++) {
-      const Uint8 *row = p + (size_t)y * c->stride;
       uint8_t *out = c->luma + (size_t)y * c->width;
-      if (c->fourcc == V4L2_PIX_FMT_NV12) memcpy(out, row, c->width);
-      else for (unsigned x = 0; x < c->width; x++) out[x] = row[2 * x];  // YUYV
+      if (c->fourcc == V4L2_PIX_FMT_MJPEG) {
+        const Uint8 *row = c->rgb + (size_t)y * c->width * 3;
+        for (unsigned x = 0; x < c->width; x++) out[x] = row[3 * x + 1];  // green ~= luma
+      } else {
+        const Uint8 *row = p + (size_t)y * c->stride;
+        if (c->fourcc == V4L2_PIX_FMT_NV12) memcpy(out, row, c->width);
+        else for (unsigned x = 0; x < c->width; x++) out[x] = row[2 * x];  // YUYV
+      }
     }
     c->luma_seq++;
     pthread_mutex_unlock(&c->luma_lock);
   }
-  if (c->fourcc == V4L2_PIX_FMT_NV12)
+  if (c->fourcc == V4L2_PIX_FMT_MJPEG)
+    SDL_UpdateTexture(c->tex, NULL, c->rgb, (int)c->width * 3);
+  else if (c->fourcc == V4L2_PIX_FMT_NV12)
     SDL_UpdateNVTexture(c->tex, NULL, p, (int)c->stride, p + c->stride * c->height, (int)c->stride);
   else
     SDL_UpdateTexture(c->tex, NULL, p, (int)c->stride);

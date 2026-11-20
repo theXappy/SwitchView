@@ -27,7 +27,7 @@ static void usage(const char *argv0)
           "  -a PCM     ALSA capture device (default hw:CARD=S,DEV=0)\n"
           "  -s WxH     capture size (default 1920x1080)\n"
           "  -r FPS     frame rate (default 60)\n"
-          "  -p FMT     pixel format: nv12 | yuyv (default nv12)\n"
+          "  -p FMT     pixel format: mjpeg | nv12 | yuyv (default mjpeg)\n"
           "  -l MS      max audio queue in ms before dropping (default 20)\n"
           "  -H HOST    Pico address (default 192.168.4.60); 'none' disables the link\n"
           "  -P PORT    Pico UDP port (default %d)\n"
@@ -48,7 +48,7 @@ int main(int argc, char **argv)
 {
   struct capture_opts co = {.video_dev = "/dev/video0", .audio_dev = "hw:CARD=S,DEV=0",
                             .width = 1920, .height = 1080, .fps = 60,
-                            .fourcc = V4L2_PIX_FMT_NV12, .audio_max_ms = 20};
+                            .fourcc = V4L2_PIX_FMT_MJPEG, .audio_max_ms = 20};
   const char *host = "192.168.4.60";
   int port = SV_PORT, vsync = 0, fullscreen = 0, verbose = 0;
   float mouse_scale = 1.0f;
@@ -59,7 +59,9 @@ int main(int argc, char **argv)
     case 'a': co.audio_dev = optarg; break;
     case 's': if (sscanf(optarg, "%dx%d", &co.width, &co.height) != 2) { usage(argv[0]); return 1; } break;
     case 'r': co.fps = atoi(optarg); break;
-    case 'p': co.fourcc = !strcmp(optarg, "yuyv") ? V4L2_PIX_FMT_YUYV : V4L2_PIX_FMT_NV12; break;
+    case 'p': co.fourcc = !strcmp(optarg, "mjpeg") ? V4L2_PIX_FMT_MJPEG
+                        : !strcmp(optarg, "yuyv")  ? V4L2_PIX_FMT_YUYV
+                                                   : V4L2_PIX_FMT_NV12; break;
     case 'l': co.audio_max_ms = atoi(optarg); break;
     case 'H': host = optarg; break;
     case 'P': port = atoi(optarg); break;
@@ -92,7 +94,8 @@ int main(int argc, char **argv)
   if (!win || !ren) { fprintf(stderr, "SDL window/renderer: %s\n", SDL_GetError()); return 1; }
   SDL_RendererInfo ri;
   SDL_GetRendererInfo(ren, &ri);
-  fprintf(stderr, "render: %s, vsync %s\n", ri.name, vsync ? "on" : "off");
+  fprintf(stderr, "render: %s (%s), vsync %s\n", ri.name,
+          SDL_GetCurrentVideoDriver(), vsync ? "on" : "off");
 
   struct capture *cap = capture_open(&co, ren);
   if (!cap) return 1;

@@ -13,7 +13,7 @@ OBJS = $(SRCS:.c=.o)
 all: $(APP)
 
 $(APP): $(OBJS)
-	$(CC) $(CFLAGS) $(OBJS) -o $@ $$(pkg-config --libs $(PKGS)) -lpthread -lm
+	$(CC) $(CFLAGS) $(OBJS) -o $@ $$(pkg-config --libs $(PKGS)) -lturbojpeg -lpthread -lm
 
 app/%.o: app/%.c app/*.h proto/switchview_proto.h
 	$(CC) $(CFLAGS) -Iproto $$(pkg-config --cflags $(PKGS)) -c $< -o $@
