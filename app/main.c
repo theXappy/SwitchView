@@ -29,8 +29,9 @@ static void usage(const char *argv0)
           "  -r FPS     frame rate (default 60)\n"
           "  -p FMT     pixel format: mjpeg | nv12 | yuyv (default mjpeg)\n"
           "  -l MS      max audio queue in ms before dropping (default 20)\n"
-          "  -H HOST    Pico address (default 192.168.4.60); 'none' disables the link\n"
-          "  -P PORT    Pico UDP port (default %d)\n"
+          "  -H HOST    'usb' (default; auto-find the board) or 'usb:/dev/hidrawN';\n"
+          "             an IPv4 address for the old UDP/Wi-Fi link; 'none' disables it\n"
+          "  -P PORT    UDP port for the IP link (default %d)\n"
           "  -v         enable vsync (no tearing, up to +1 frame latency)\n"
           "  -f         start fullscreen (video only)\n"
           "  -n         no audio\n"
@@ -49,7 +50,7 @@ int main(int argc, char **argv)
   struct capture_opts co = {.video_dev = "/dev/video0", .audio_dev = "hw:CARD=S,DEV=0",
                             .width = 1920, .height = 1080, .fps = 60,
                             .fourcc = V4L2_PIX_FMT_MJPEG, .audio_max_ms = 20};
-  const char *host = "192.168.4.60";
+  const char *host = "usb";
   int port = SV_PORT, vsync = 0, fullscreen = 0, verbose = 0;
   float mouse_scale = 1.0f;
   int c;
